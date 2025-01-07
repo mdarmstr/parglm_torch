@@ -19,7 +19,10 @@ pip install .
 ```
 
 ## Authors
-Michael Sorochan Armstrong, Jos\'e Camacho
+
+Translated from parglm from the MEDA toolbox: https://github.com/CoDaSLab/MEDA-Toolbox/
+
+Michael Sorochan Armstrong, José Camacho
 
 contact: mdarmstr(at)ugr.es
 
