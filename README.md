@@ -10,6 +10,9 @@ A Python package for performing multivariate General Linear Model (GLM) analysis
 - Interaction modeling for experimental designs
 
 ## Installation
+
+Set up PyTorch within your virtual environment.
+
 Clone the repository and install the package using `setup.py`:
 
 ```bash
