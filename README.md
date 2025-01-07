@@ -18,9 +18,14 @@ cd parglm_torch
 pip install .
 ```
 
+## Authors
+Michael Sorochan Armstrong, Jos\'e Camacho
+
+contact: mdarmstr(at)ugr.es
+
 ## Copyright
 
-Copyright (C) 2024  Universidad de Granada
+Copyright (C) 2025  Universidad de Granada
  
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
