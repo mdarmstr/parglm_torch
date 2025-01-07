@@ -16,8 +16,9 @@ Clone the repository and install the package using `setup.py`:
 git clone https://github.com/mdarmstr/parglm_torch.git
 cd parglm_torch
 pip install .
+```
 
-<h2>Copyright</h2>
+## Copyright
 
 Copyright (C) 2024  Universidad de Granada
  
