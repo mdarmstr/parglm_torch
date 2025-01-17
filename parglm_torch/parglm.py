@@ -305,7 +305,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     if X_residuals.is_complex():
         SSQ_residuals = torch.sum(torch.abs(torch.diag(X_residuals @ X_residuals.T.conj()))).item()
     else:
-        SSQ_residuals = torch.sum(X ** 2).item()
+        SSQ_residuals = torch.sum(X_residuals ** 2).item() ###
 
     for f in range(n_factors):
         Dvars = parglmo['factors'][f]['Dvars']
@@ -493,10 +493,15 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     par_list = parglmo['effects'].tolist() + [100]
     DoF = [mdf] if Preprocessing else []
     DoF += df.tolist()
-    DoF.append(df_int[0].item())
+    
+    if len(Fi) > 0:
+        DoF.extend([t.item() for t in df_int])
+    
     DoF.append(Rdf.item())
     DoF.append(Tdf)
+    
     MSQ = [np.abs(s) / d if d != 0 else np.nan for s, d in zip(SSQ_list, DoF)]
+    
     F_list = [np.nan]
     F_list += F_factors[0, :].tolist()
     F_list += F_interactions[0, :].tolist()
@@ -517,6 +522,3 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     T = pd.DataFrame(data)
 
     return T, parglmo
-
-
-
