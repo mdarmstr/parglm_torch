@@ -48,7 +48,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     """
     # Convert inputs to torch tensors if they aren't already
     if not isinstance(X, torch.Tensor):
-        X = torch.tensor(X, dtype=torch.float)
+        X = torch.tensor(X, dtype=torch.complex64)
     if not isinstance(F, torch.Tensor):
         F = torch.tensor(F, dtype=torch.float)
 
