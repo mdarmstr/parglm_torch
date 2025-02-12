@@ -52,6 +52,13 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     if not isinstance(F, torch.Tensor):
         F = torch.tensor(F, dtype=torch.float)
 
+    # Check: if any column in F has only one unique value then return an error.
+    for col in range(F.shape[1]):
+        unique_vals = torch.unique(F[:, col])
+        if unique_vals.numel() == 1:
+            raise ValueError(f"Design matrix F has column {col} with a single unique value: {unique_vals.item()}. "
+                             "Each factor must have at least two unique values.")
+
     X.to(device)
     F.to(device)
 
