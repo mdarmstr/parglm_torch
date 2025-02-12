@@ -11,7 +11,8 @@ setup(
         'torch',
         'numpy',
         'pandas',
-        'scipy'
+        'scipy',
+        'seaborn'
     ],
     classifiers=[
         'Programming Language :: Python :: 3',
