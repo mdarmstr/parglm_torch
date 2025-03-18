@@ -51,7 +51,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         if np.iscomplexobj(X):
            X = torch.tensor(X, dtype=torch.complex64)
         else:
-            X = torch.tensor(X, dtype=torch.float64)
+           X = torch.tensor(X, dtype=torch.float)
     if not isinstance(F, torch.Tensor):
         F = torch.tensor(F, dtype=torch.float)
 
