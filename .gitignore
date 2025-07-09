@@ -1,7 +1,2 @@
-__pycache__/
-*.pyc
-*.env/
 venv/
-data.mat
-*.egg-info
-build/
+*.mat

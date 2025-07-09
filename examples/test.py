@@ -61,5 +61,6 @@ print(f"CPU Time: {cpu_time:.4f} seconds")
 
 gpu_table, gpu_parglmo, gpu_time = benchmark_parglm(X_tensor, F_tensor, device='cuda')
 print(f"GPU Time: {gpu_time:.4f} seconds")
+print(gpu_table)
     
 
