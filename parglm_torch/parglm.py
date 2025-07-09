@@ -171,7 +171,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             raise ValueError('Invalid Preprocessing option')
         return Xs, m, dt
 
-    Xs, m, dt = preprocess2D(X, Preprocessing=Preprocessing)
+    X, m, dt = preprocess2D(X, Preprocessing=Preprocessing)
     X = X / dt.to(device)  # Scale the data
     parglmo['scale'] = dt
 
