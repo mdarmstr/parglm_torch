@@ -7,7 +7,6 @@ from itertools import combinations, combinations_with_replacement, product
 from parglm_torch.simuleMV import *
 from scipy.io import savemat
 
-
 def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
            Ordinal=None, Fmtc=0, Coding=None, Nested=None, device='cpu'):
     """
@@ -62,8 +61,8 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             raise ValueError(f"Design matrix F has column {col} with a single unique value: {unique_vals.item()}. "
                              "Each factor must have at least two unique values.")
 
-    X.to(device)
-    F.to(device)
+    X = X.to(device)
+    F = F.to(device)
 
     N, M = X.shape
     n_factors = F.shape[1]
@@ -80,7 +79,26 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     if Nested is None:
         Nested = []
     else:
+        # force list of [parent, child]
         Nested = [list(map(int, pair)) for pair in Nested]
+
+        for pair in Nested:
+            if len(pair) != 2:
+                raise ValueError("Nested must be a list of [parent, child] pairs")
+
+            parent, child = pair
+
+            if not (0 <= parent < n_factors and 0 <= child < n_factors):
+                raise ValueError(
+                    f"Nested pair {pair} out of range for {n_factors} factors "
+                    "(expected 0-indexed)"
+                )
+
+            if parent == child:
+                raise ValueError(f"Nested pair {pair} is invalid (parent == child)")
+            
+    nested_child_to_parent = {child: parent for parent, child in Nested}
+    nested_children = set(nested_child_to_parent.keys())
 
     # Determine interactions based on Model
     def allinter(factors, order):
@@ -193,31 +211,94 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             parglmo['factors'][f]['order'] = 1
             parglmo['factors'][f]['factors'] = []
         else:
-            if not Nested or f not in [pair[1] for pair in Nested]:
+            if (not Nested) or (f not in nested_children):
+
                 parglmo['factors'][f]['factors'] = []
-                uF = torch.unique(F[:, f])
-                parglmo['n_levels'][f] = len(uF)
+                uF = torch.unique(F[:, f], sorted=True)   # global levels
+                parglmo['n_levels'][f] = int(uF.numel())
+
                 Dvars = []
-                for i in range(1, len(uF)):
-                    D_col = (F[:, f] == uF[i]).float().unsqueeze(1)
+
+                # create L-1 columns, each indicates membership in level i (i>=1)
+                for i in range(1, int(uF.numel())):
+                    D_col = (F[:, f] == uF[i]).float().unsqueeze(1)   # Nx1
                     D_list.append(D_col.to(device))
                     Dvars.append(n)
                     n += 1
-                parglmo['factors'][f]['Dvars'] = Dvars
-                # Factor coding
-                if Coding[f] == 1:
-                    D_cols = D_list[-len(Dvars):]
-                    for D_col in D_cols:
-                        D_col[F[:, f] == uF[0]] = 0
-                else:
-                    D_cols = D_list[-len(Dvars):]
-                    for D_col in D_cols:
-                        D_col[F[:, f] == uF[0]] = -1
-                parglmo['factors'][f]['order'] = 1
 
-    # Ensure D_list tensors are moved to the correct device
+                parglmo['factors'][f]['Dvars'] = Dvars
+
+                # apply baseline coding to rows at uF[0]
+                if len(Dvars) > 0:
+                    base_mask = (F[:, f] == uF[0])
+                    recent_cols = D_list[-len(Dvars):]
+                    for ccol in recent_cols:
+                        ccol[base_mask] = 0 if Coding[f] == 1 else -1
+
+                parglmo['factors'][f]['order'] = 1
+            # CASE B: nested factor (this is the missing MATLAB functionality)
+            else:
+                parent = nested_child_to_parent[f]  # parent factor index
+
+                # store nesting chain like MATLAB:
+                # child.factors = [parent, parent.factors...]
+                parent_chain = parglmo['factors'][parent].get('factors', [])
+                parglmo['factors'][f]['factors'] = [parent] + parent_chain
+
+                # order increments from parent like MATLAB
+                parent_order = parglmo['factors'][parent].get('order', 1)
+                parglmo['factors'][f]['order'] = parent_order + 1
+
+                u_parent = torch.unique(F[:, parent], sorted=True)
+
+                Dvars = []
+                n_levels_total = 0  # MATLAB tracks total number of child levels across blocks
+
+                # For each parent level, create its own local dummy variables for child
+                for lvl in u_parent:
+                    rind = (F[:, parent] == lvl)              # boolean mask (N,)
+                    child_vals = torch.unique(F[rind, f], sorted=True)
+                    L = int(child_vals.numel())
+                    n_levels_total += L
+
+                    # Build L-1 columns for this parent block
+                    cols_this_block = []
+                    for i in range(1, L):
+                        col = torch.zeros(N, 1, device=device)
+                        col[rind] = (F[rind, f] == child_vals[i]).float().unsqueeze(1)
+                        D_list.append(col)
+                        cols_this_block.append(col)
+                        Dvars.append(n)
+                        n += 1
+
+                    # Baseline coding within this parent block:
+                    # rows with child_vals[0] get -1 (deviation) or 0 (reference)
+                    if L > 1:
+                        base_mask = rind & (F[:, f] == child_vals[0])
+                        for ccol in cols_this_block:
+                            ccol[base_mask] = 0 if Coding[f] == 1 else -1
+
+                parglmo['factors'][f]['Dvars'] = Dvars
+                parglmo['n_levels'][f] = n_levels_total
+
     D_list = [d.to(device) for d in D_list]
     D = torch.cat(D_list, dim=1)
+
+    # DEBUG: nested sanity check (correct)
+    # Each nested-design column must only be active (nonzero) within ONE parent level.
+    for child, parent in nested_child_to_parent.items():
+        child_cols = parglmo['factors'][child]['Dvars']
+        if len(child_cols) == 0:
+            continue
+
+        for k in child_cols:
+            nz = (D[:, k] != 0)
+            parent_levels_used = torch.unique(F[nz, parent], sorted=True)
+            assert parent_levels_used.numel() == 1, (
+                f"Nested column {k} for child factor {child} is active in multiple "
+                f"parent levels of factor {parent}: {parent_levels_used.tolist()}"
+            )
+    print("✅ Nested sanity check passed: each nested column belongs to exactly one parent level.")
 
     # Function to compute interaction terms
     def computaDint(interactions, factors, D):

@@ -1,5 +1,5 @@
+torch
 numpy
 pandas
 scipy
 seaborn
-torch
