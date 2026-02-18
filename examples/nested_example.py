@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from parglm_torch.simuleMV import simuleMV
 from parglm_torch.parglm import parglm
+from scipy.io import savemat
 
 def create_nested_design_two_nested_factors(
     A_levels=(0, 1, 2),
@@ -135,6 +136,17 @@ print("Unique B:", len(np.unique(F[:,1])))
 print("Unique C:", len(np.unique(F[:,2])))
 print(F)
 
+savemat(
+    "data_nested.mat",
+    {
+        "F": F,
+        "X": X.detach().cpu().numpy(),
+        "Nested": Nested,
+    },
+    do_compression=True
+)
+
+
 T, parglmo = parglm(
     X,
     F,
@@ -146,7 +158,7 @@ T, parglmo = parglm(
     Coding=[0,0,0],          
     Nested=[[0,1],[1,2]], 
     Random = [0,1,1],
-    device="cpu"
+    device="cuda"
 )
 
 print(T)

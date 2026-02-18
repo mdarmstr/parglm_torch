@@ -8,7 +8,7 @@ from parglm_torch.simuleMV import *
 from scipy.io import savemat
 
 def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
-           Ordinal=None, Fmtc=0, Coding=None, Nested=None, device='cpu'):
+           Ordinal=None, Fmtc=0, Coding=None, Nested=None, Random=None, device='cpu'):
     """
 
     Parallel General Linear Model to obtain multivariate factor and interaction
@@ -38,6 +38,8 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         Type of coding of factors: 0 (sum/deviation), 1 (reference).
     Nested : list of lists, default=None
         Pairs of nested factors, e.g., [[1, 2], [2, 3]] if factor 2 is nested in 1, and 3 in 2.
+    Random: list or numpy.ndarray, default=None
+        Indicates whether factors are fixed (0) or random (1).
 
     Returns:
     T : pandas.DataFrame
@@ -99,6 +101,14 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             
     nested_child_to_parent = {child: parent for parent, child in Nested}
     nested_children = set(nested_child_to_parent.keys())
+
+    if Random is None:
+        Random = torch.zeros(n_factors, dtype=torch.int64)
+    else:
+        Random = torch.tensor(Random, dtype=torch.int64)
+        if Random.numel() != n_factors:
+            raise ValueError("Random must be length n_factors")
+    Random = Random.to(device)
 
     # Determine interactions based on Model
     def allinter(factors, order):
@@ -169,6 +179,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     parglmo['fmtc'] = Fmtc
     parglmo['coding'] = Coding
     parglmo['nested'] = Nested
+    parglmo["random"] = Random
 
     # Preprocess the data
     def preprocess2D(X, Preprocessing=2):
@@ -197,7 +208,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     D_list = []
     n = 0
     if Preprocessing:
-        D_list.append(torch.ones(N, 1, device=device))  # Ensure the tensor is created on the correct device
+        D_list.append(torch.ones(N, 1, device=device))  
         n += 1
 
     parglmo['n_levels'] = {}
@@ -236,23 +247,23 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
                         ccol[base_mask] = 0 if Coding[f] == 1 else -1
 
                 parglmo['factors'][f]['order'] = 1
-            # CASE B: nested factor (this is the missing MATLAB functionality)
+            # nested factor 
             else:
                 parent = nested_child_to_parent[f]  # parent factor index
 
-                # store nesting chain like MATLAB:
+                # store nesting chain
                 # child.factors = [parent, parent.factors...]
                 parent_chain = parglmo['factors'][parent].get('factors', [])
                 parglmo['factors'][f]['factors'] = [parent] + parent_chain
 
-                # order increments from parent like MATLAB
+                # order increments
                 parent_order = parglmo['factors'][parent].get('order', 1)
                 parglmo['factors'][f]['order'] = parent_order + 1
 
                 u_parent = torch.unique(F[:, parent], sorted=True)
 
                 Dvars = []
-                n_levels_total = 0  # MATLAB tracks total number of child levels across blocks
+                n_levels_total = 0  # total number of child levels across blocks
 
                 # For each parent level, create its own local dummy variables for child
                 for lvl in u_parent:
@@ -284,23 +295,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     D_list = [d.to(device) for d in D_list]
     D = torch.cat(D_list, dim=1)
 
-    # DEBUG: nested sanity check (correct)
-    # Each nested-design column must only be active (nonzero) within ONE parent level.
-    for child, parent in nested_child_to_parent.items():
-        child_cols = parglmo['factors'][child]['Dvars']
-        if len(child_cols) == 0:
-            continue
-
-        for k in child_cols:
-            nz = (D[:, k] != 0)
-            parent_levels_used = torch.unique(F[nz, parent], sorted=True)
-            assert parent_levels_used.numel() == 1, (
-                f"Nested column {k} for child factor {child} is active in multiple "
-                f"parent levels of factor {parent}: {parent_levels_used.tolist()}"
-            )
-    print("✅ Nested sanity check passed: each nested column belongs to exactly one parent level.")
-
-    # Function to compute interaction terms
+    # Function to compute interaction termі
     def computaDint(interactions, factors, D):
         if len(interactions) > 1:
             deepD = computaDint(interactions[1:], factors, D)
@@ -322,6 +317,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         D = torch.cat((D, Dout), dim=1)
         parglmo['interactions'][i]['Dvars'] = list(range(n, n + Dout.shape[1]))
         parglmo['interactions'][i]['factors'] = interaction
+        parglmo['interactions'][i]['type'] = int(torch.sum(Random[torch.tensor(interaction, device=device)] == 1) > 0)
         n = D.shape[1]
         parglmo['interactions'][i]['order'] = max([parglmo['factors'][f]['order'] for f in interaction]) + 1
 
@@ -329,7 +325,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     Tdf = N
     mdf = 1 if Preprocessing else 0
     Rdf = Tdf - mdf
-    df = torch.zeros(n_factors, dtype=torch.int)
+    df = torch.zeros(n_factors, dtype=torch.int64, device=device)
     for f in range(n_factors):
         if Ordinal[f]:
             df[f] = 1
@@ -337,15 +333,62 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             df[f] = len(parglmo['factors'][f]['Dvars'])
         Rdf -= df[f]
 
-    df_int = []
-    for i, interaction in enumerate(parglmo['interactions']):
-        df_i = torch.prod(df[interaction['factors']])
-        df_int.append(df_i)
-        Rdf -= df_i
+    df_int = torch.zeros(n_interactions, dtype=torch.int64, device=device)
+    for i in range(n_interactions):
+        facs = parglmo['interactions'][i]['factors']  # defined in the interaction loop
+        df_int[i] = torch.prod(df[torch.tensor(facs, device=device)])
+        Rdf -= df_int[i]
 
     if Rdf < 0:
         print('Warning: degrees of freedom exhausted')
         return
+
+    # DEBUG: nested sanity check (correct)
+    # Each nested-design column must only be active (nonzero) within ONE parent level.
+    for child, parent in nested_child_to_parent.items():
+        child_cols = parglmo['factors'][child]['Dvars']
+        if len(child_cols) == 0:
+            continue
+
+        for k in child_cols:
+            nz = (D[:, k] != 0)
+            parent_levels_used = torch.unique(F[nz, parent], sorted=True)
+            assert parent_levels_used.numel() == 1, (
+                f"Nested column {k} for child factor {child} is active in multiple "
+                f"parent levels of factor {parent}: {parent_levels_used.tolist()}"
+            )
+    print("Nested sanity check passed: each nested column belongs to exactly one parent level.")
+
+    print("\n--- D summary ---")
+    print("D shape:", tuple(D.shape))
+    for f in range(n_factors):
+        dv = parglmo["factors"][f]["Dvars"]
+        print(
+            f"Factor {f}: #Dvars={len(dv)}, order={parglmo['factors'][f].get('order')}, "
+            f"nested_chain={parglmo['factors'][f].get('factors')}"
+        )
+
+    A, B = 0, 1
+    B_cols = parglmo["factors"][B]["Dvars"]
+
+    print("\n--- Column ownership: B(A) ---")
+    for k in B_cols[:min(10, len(B_cols))]:  # print a few
+        nz = (D[:, k] != 0)
+        owners = torch.unique(F[nz, A]).detach().cpu().numpy().tolist()
+        print(f"B col {k}: active A-levels = {owners}")
+    
+    C = 2
+    C_cols = parglmo["factors"][C]["Dvars"]
+
+    print("\n--- Column ownership: C(B) ---")
+    for k in C_cols[:min(10, len(C_cols))]:
+        nz = (D[:, k] != 0)
+        owners = torch.unique(F[nz, B]).detach().cpu().numpy().tolist()
+        print(f"C col {k}: active B-levels = {owners}")
+
+    print("\n--- D (nonzero pattern) first 40 rows, first 40 cols ---")
+    Dn = (D[:40, :40] != 0).int().detach().cpu().numpy()
+    print(Dn)
 
     # Handle missing data
     Xnan = X.clone()
@@ -400,32 +443,20 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     else:
         SSQ_residuals = torch.sum(X_residuals ** 2).item()
 
-    #Factors
+    # Factors
     for f in range(n_factors):
         Dvars = parglmo['factors'][f]['Dvars']
         mat = D[:, Dvars] @ B[Dvars, :]
         parglmo['factors'][f]['matrix'] = mat
+        SSQ_factors[0, f] = torch.sum(torch.abs(mat) ** 2).item()
 
-        if mat.is_complex():
-            # use diagonal-based SSQ for complex
-            SSQ_factors[0, f] = torch.sum(
-                torch.abs(torch.diag(mat @ mat.T.conj()))
-            ).item()
-        else:
-            SSQ_factors[0, f] = torch.sum(torch.abs(mat) ** 2).item()
+    # Interactions
+    for i, interaction in enumerate(parglmo['interactions']):
+        Dvars = interaction['Dvars']
+        mat = D[:, Dvars] @ B[Dvars, :]
+        interaction['matrix'] = mat
+        SSQ_interactions[0, i] = torch.sum(torch.abs(mat) ** 2).item()
 
-        # Interactions
-        for i, interaction in enumerate(parglmo['interactions']):
-            Dvars = interaction['Dvars']
-            mat = D[:, Dvars] @ B[Dvars, :]
-            interaction['matrix'] = mat
-
-            if mat.is_complex():
-                SSQ_interactions[0, i] = torch.sum(
-                    torch.abs(torch.diag(mat @ mat.T.conj()))
-                ).item()
-            else:
-                SSQ_interactions[0, i] = torch.sum(torch.abs(mat) ** 2).item()
 
     # Normalize at the final step
     parglmo['effects'] = 100 * np.array(
@@ -434,53 +465,94 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
 
     parglmo['residuals'] = X_residuals
 
+    MS_e = SSQ_residuals / Rdf.item()
+
+    # init references
+    for f in range(n_factors):
+        parglmo['factors'][f]['refF'] = []
+        parglmo['factors'][f]['refI'] = []
+
+    for i in range(n_interactions):
+        parglmo['interactions'][i]['refI'] = []
+
+    if Ts == 2:
+        # Factors: collect random nested factors and random interactions containing factor
+        for f in range(n_factors):
+            # random nested factors f2 where f is in f2's nesting chain
+            for f2 in range(n_factors):
+                if int(Random[f2].item()) == 1:
+                    chain = parglmo['factors'][f2].get('factors', [])
+                    if (f in chain) and (df[f2].item() > 0):
+                        MS_f2 = SSQ_factors[0, f2].item() / df[f2].item()
+                        if MS_e < MS_f2:
+                            parglmo['factors'][f]['refF'].append(f2)
+
+            # random interactions containing f where at least one "rest" factor is random
+            for i in range(n_interactions):
+                facs = parglmo['interactions'][i]['factors']
+                if f in facs and df_int[i].item() > 0:
+                    rest = [g for g in facs if g != f]
+                    if any(int(Random[g].item()) == 1 for g in rest):
+                        MS_i = SSQ_interactions[0, i].item() / df_int[i].item()
+                        if MS_e < MS_i:
+                            parglmo['factors'][f]['refI'].append(i)
+
+        # Interactions: collect higher-order interactions that contain current interaction
+        for i in range(n_interactions):
+            facs_i = set(parglmo['interactions'][i]['factors'])
+            for i2 in range(n_interactions):
+                facs_i2 = set(parglmo['interactions'][i2]['factors'])
+                if facs_i.issubset(facs_i2) and (len(facs_i2) > len(facs_i)) and df_int[i2].item() > 0:
+                    rest = list(facs_i2 - facs_i)
+                    if any(int(Random[g].item()) == 1 for g in rest):
+                        MS_i2 = SSQ_interactions[0, i2].item() / df_int[i2].item()
+                        if MS_e < MS_i2:
+                            parglmo['interactions'][i]['refI'].append(i2)
 
     # Compute nominal F-values for factors before the loop
     for f in range(n_factors):
         if Ts == 2:
-            # Hierarchical F-value computation (if applicable)
-            SS_ref = 0
-            Df_ref = 0
-            for f2 in range(n_factors):
-                if f in parglmo['factors'][f2].get('factors', []):
-                    SS_ref += SSQ_factors[0, f2]
-                    Df_ref += df[f2]
-            for i in range(n_interactions):
-                if f in parglmo['interactions'][i]['factors']:
-                    SS_ref += SSQ_interactions[0, i]
-                    Df_ref += df_int[i]
-            if SS_ref == 0:
-                F_value = (SSQ_factors[0, f] / df[f]) / (SSQ_residuals / Rdf)
+            refF = parglmo['factors'][f].get('refF', [])
+            refI = parglmo['factors'][f].get('refI', [])
+
+            SSref = sum(SSQ_factors[0, f2].item() for f2 in refF) + \
+                    sum(SSQ_interactions[0, i].item() for i in refI)
+            Dfref = sum(df[f2].item() for f2 in refF) + \
+                    sum(df_int[i].item() for i in refI)
+
+            if SSref == 0:
+                MSref = SSQ_residuals / Rdf.item()
             else:
-                F_value = (SSQ_factors[0, f] / df[f]) / (SS_ref / Df_ref)
+                MSref = SSref / Dfref
+
+            F_value = (SSQ_factors[0, f].item() / df[f].item()) / MSref
         else:
-            F_value = (SSQ_factors[0, f] / df[f]) / (SSQ_residuals / Rdf)
+            F_value = (SSQ_factors[0, f].item() / df[f].item()) / (SSQ_residuals / Rdf.item())
+
         F_factors[0, f] = F_value
 
+    # Compute nominal F-values for interactions (observed)
     for i in range(n_interactions):
         if Ts == 2:
-            # Hierarchical F-value computation (if applicable)
-            SS_ref = 0
-            Df_ref = 0
-            for f2 in range(n_factors):
-                if any(f in parglmo['interactions'][i]['factors'] for f in parglmo['factors'][f2].get('factors', [])):
-                    SS_ref += SSQ_factors[0, f2]
-                    Df_ref += df[f2]
-            for j in range(n_interactions):
-                if j != i and any(f in parglmo['interactions'][i]['factors'] for f in parglmo['interactions'][j]['factors']):
-                    SS_ref += SSQ_interactions[0, j]
-                    Df_ref += df_int[j]
-            if SS_ref == 0:
-                F_value = (SSQ_interactions[0, i] / df_int[i]) / (SSQ_residuals / Rdf)
+            refI = parglmo['interactions'][i].get('refI', [])
+
+            SSref = sum(SSQ_interactions[0, i2].item() for i2 in refI)
+            Dfref = sum(df_int[i2].item() for i2 in refI)
+
+            if SSref == 0:
+                MSref = SSQ_residuals / Rdf.item()
             else:
-                F_value = (SSQ_interactions[0, i] / df_int[i]) / (SS_ref / Df_ref)
+                MSref = SSref / Dfref
+
+            F_value = (SSQ_interactions[0, i].item() / df_int[i].item()) / MSref
         else:
-            F_value = (SSQ_interactions[0, i] / df_int[i]) / (SSQ_residuals / Rdf)
+            F_value = (SSQ_interactions[0, i].item() / df_int[i].item()) / (SSQ_residuals / Rdf.item())
+
         F_interactions[0, i] = F_value
 
     # Permutations
     for j in range(1, Permutations * mtcc + 1):
-        perms = torch.randperm(N)
+        perms = torch.randperm(N, device=device)
         X_perm = Xnan[perms, :].clone()
 
         # Handle missing data in permuted X
@@ -514,7 +586,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             Dvars = parglmo['factors'][f]['Dvars']
             factor_matrix = D[:, Dvars] @ B_perm[Dvars, :]
             SSQf.append(torch.sum(torch.abs(factor_matrix) ** 2).item())
-        SSQ_factors[j, :] = torch.tensor(SSQf)
+        SSQ_factors[j, :] = torch.tensor(SSQf, device=device, dtype=SSQ_factors.dtype)
 
         # Interactions
         SSQi = []
@@ -522,38 +594,58 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             Dvars = interaction['Dvars']
             interaction_matrix = D[:, Dvars] @ B_perm[Dvars, :]
             SSQi.append(torch.sum(torch.abs(interaction_matrix) ** 2).item())
-        SSQ_interactions[j, :] = torch.tensor(SSQi)
+        SSQ_interactions[j, :] = torch.tensor(SSQi, device=device, dtype=SSQ_interactions.dtype)
 
         # F Factors
         Ff = []
+        MS_e_perm = SSQ_residuals_perm / Rdf.item()
+
         for f in range(n_factors):
             if Ts == 2:
-                MSS_ref = 0
-                Df_ref = 0
-                for f2 in range(n_factors):
-                    if f in parglmo['factors'][f2].get('factors', []):
-                        MSS_ref += SSQf[f2]
-                        Df_ref += df[f2]
-                for i_int, interaction in enumerate(parglmo['interactions']):
-                    if f in interaction['factors']:
-                        MSS_ref += SSQi[i_int]
-                        Df_ref += df_int[i_int]
-                if MSS_ref == 0:
-                    F_value = (SSQf[f] / df[f]) / (SSQ_residuals_perm / Rdf)
-                else:
-                    F_value = (SSQf[f] / df[f]) / (MSS_ref / Df_ref)
+                refF = parglmo['factors'][f].get('refF', [])
+                refI = parglmo['factors'][f].get('refI', [])
+
+                SSref = 0.0
+                Dfref = 0.0
+
+                for f2 in refF:
+                    SSref += float(SSQf[f2])
+                    Dfref += float(df[f2].item())
+
+                for i2 in refI:
+                    SSref += float(SSQi[i2])
+                    Dfref += float(df_int[i2].item())
+
+                MSref = (SSref / Dfref) if SSref > 0 else MS_e_perm
+                F_value = (float(SSQf[f]) / float(df[f].item())) / MSref
             else:
-                F_value = (SSQf[f] / df[f]) / (SSQ_residuals_perm / Rdf)
+                F_value = (float(SSQf[f]) / float(df[f].item())) / MS_e_perm
+
             Ff.append(F_value)
-        F_factors[j, :] = torch.tensor(Ff)
 
-        # F Interactions
+        F_factors[j, :] = torch.tensor(Ff, device=device, dtype=F_factors.dtype)
+
+        # Interactions
         Fi = []
-        for i_int, interaction in enumerate(parglmo['interactions']):
-            F_value = (SSQi[i_int] / df_int[i_int]) / (SSQ_residuals_perm / Rdf)
-            Fi.append(F_value)
-        F_interactions[j, :] = torch.tensor(Fi)
+        for i_int in range(n_interactions):
+            if Ts == 2:
+                refI = parglmo['interactions'][i_int].get('refI', [])
 
+                SSref = 0.0
+                Dfref = 0.0
+
+                for i2 in refI:
+                    SSref += float(SSQi[i2])
+                    Dfref += float(df_int[i2].item())
+
+                MSref = (SSref / Dfref) if SSref > 0 else MS_e_perm
+                F_value = (float(SSQi[i_int]) / float(df_int[i_int].item())) / MSref
+            else:
+                F_value = (float(SSQi[i_int]) / float(df_int[i_int].item())) / MS_e_perm
+
+            Fi.append(F_value)
+
+        F_interactions[j, :] = torch.tensor(Fi, device=device, dtype=F_interactions.dtype)
     # Select test statistic
     ts_factors = F_factors if Ts else SSQ_factors
     ts_interactions = F_interactions if Ts else SSQ_interactions
@@ -620,6 +712,33 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     p_values += parglmo['p'].tolist()
     p_values += [np.nan, np.nan]
 
+    den_ref_col = []
+
+    # Mean row
+    if Preprocessing:
+        den_ref_col.append(np.nan)
+
+    # Factor rows
+    for f in range(n_factors):
+        rf = parglmo['factors'][f].get('refF', [])
+        ri = parglmo['factors'][f].get('refI', [])
+
+        if (rf or ri):
+            den_ref_col.append(f"F{rf};I{ri}")
+        else:
+            den_ref_col.append("Residuals")  
+
+    # Interaction rows
+    for i in range(n_interactions):
+        ri = parglmo['interactions'][i].get('refI', [])
+        if ri:
+            den_ref_col.append(f"I{ri}")
+        else:
+            den_ref_col.append("Residuals")
+
+    # Residuals + Total
+    den_ref_col += [np.nan, np.nan]
+    
     data = {
         'Source': names,
         'SumSq': SSQ_list,
@@ -627,8 +746,10 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         'df': DoF,
         'MeanSq': MSQ,
         'F': F_list,
-        'Pvalue': p_values
+        'Pvalue': p_values,
+        'Den_ref': den_ref_col 
     }
+
     T = pd.DataFrame(data)
 
     return T, parglmo
