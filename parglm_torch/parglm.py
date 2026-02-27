@@ -233,7 +233,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
                 Dvars = []
 
                 # create L-1 columns, each indicates membership in level i (i>=1)
-                for i in range(1, int(uF.numel())):
+                for i in range(1, parglmo['n_levels'][f]):
                     D_col = (F[:, f] == uF[i]).float().unsqueeze(1)   # Nx1
                     D_list.append(D_col.to(device))
                     Dvars.append(n)
@@ -265,9 +265,9 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
                 u_parent = torch.unique(F[:, parent], sorted=True)
 
                 Dvars = []
-                n_levels_total = 0  # total number of child levels across blocks
+                n_levels_total = 0  # total number of child levels
 
-                # For each parent level, create its own local dummy variables for child
+                # For each parent level, local dummy variables for child
                 for lvl in u_parent:
                     rind = (F[:, parent] == lvl)              # boolean mask (N,)
                     child_vals = torch.unique(F[rind, f], sorted=True)
@@ -344,53 +344,6 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     if Rdf < 0:
         print('Warning: degrees of freedom exhausted')
         return
-
-    # # DEBUG: nested sanity check (correct)
-    # # Each nested-design column must only be active (nonzero) within ONE parent level.
-    # for child, parent in nested_child_to_parent.items():
-    #     child_cols = parglmo['factors'][child]['Dvars']
-    #     if len(child_cols) == 0:
-    #         continue
-
-    #     for k in child_cols:
-    #         nz = (D[:, k] != 0)
-    #         parent_levels_used = torch.unique(F[nz, parent], sorted=True)
-    #         assert parent_levels_used.numel() == 1, (
-    #             f"Nested column {k} for child factor {child} is active in multiple "
-    #             f"parent levels of factor {parent}: {parent_levels_used.tolist()}"
-    #         )
-    # print("Nested sanity check passed: each nested column belongs to exactly one parent level.")
-
-    # print("\n--- D summary ---")
-    # print("D shape:", tuple(D.shape))
-    # for f in range(n_factors):
-    #     dv = parglmo["factors"][f]["Dvars"]
-    #     print(
-    #         f"Factor {f}: #Dvars={len(dv)}, order={parglmo['factors'][f].get('order')}, "
-    #         f"nested_chain={parglmo['factors'][f].get('factors')}"
-    #     )
-
-    # A, B = 0, 1
-    # B_cols = parglmo["factors"][B]["Dvars"]
-
-    # print("\n--- Column ownership: B(A) ---")
-    # for k in B_cols[:min(10, len(B_cols))]:  # print a few
-    #     nz = (D[:, k] != 0)
-    #     owners = torch.unique(F[nz, A]).detach().cpu().numpy().tolist()
-    #     print(f"B col {k}: active A-levels = {owners}")
-    
-    # C = 2
-    # C_cols = parglmo["factors"][C]["Dvars"]
-
-    # print("\n--- Column ownership: C(B) ---")
-    # for k in C_cols[:min(10, len(C_cols))]:
-    #     nz = (D[:, k] != 0)
-    #     owners = torch.unique(F[nz, B]).detach().cpu().numpy().tolist()
-    #     print(f"C col {k}: active B-levels = {owners}")
-
-    # print("\n--- D (nonzero pattern) first 40 rows, first 40 cols ---")
-    # Dn = (D[:40, :40] != 0).int().detach().cpu().numpy()
-    # print(Dn)
 
     # Handle missing data
     Xnan = X.clone()
@@ -476,7 +429,7 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
 
     MS_e = SSQ_residuals / Rdf.item()
 
-    # init references
+    # init references, preallocation
     for f in range(n_factors):
         parglmo['factors'][f]['refF'] = []
         parglmo['factors'][f]['refI'] = []
@@ -485,43 +438,91 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         parglmo['interactions'][i]['refI'] = []
 
     if Ts == 2:
+        # LOGIC: iterate through number of factors, interactions
+        # Find parent/child pairs
+        # Find child with lowest order
+        # Select all children with lowest order.
+
         # Factors: collect random nested factors and random interactions containing factor
         for f in range(n_factors):
             # random nested factors f2 where f is in f2's nesting chain
+            f_order = int(parglmo['factors'][f]['order'])
+            candidates = []
+
             for f2 in range(n_factors):
-                if int(Random[f2].item()) == 1:
-                    chain = parglmo['factors'][f2].get('factors', [])
-                    if (f in chain) and (df[f2].item() > 0):
-                        MS_f2 = SSQ_factors[0, f2].item() / df[f2].item()
-                        if MS_e < MS_f2:
-                            parglmo['factors'][f]['refF'].append(f2)
+                if int(Random[f2].item()) != 1: #if not random, ignore
+                    continue
 
-            # random interactions containing f where at least one "rest" factor is random
-            for i in range(n_interactions):
-                facs = parglmo['interactions'][i]['factors']
-                if f in facs and df_int[i].item() > 0:
-                    rest = [g for g in facs if g != f]
-                    if any(int(Random[g].item()) == 1 for g in rest):
-                        MS_i = SSQ_interactions[0, i].item() / df_int[i].item()
-                        if MS_e < MS_i:
-                            parglmo['factors'][f]['refI'].append(i)
+                chain = parglmo['factors'][f2].get('factors',[])
 
-        # Interactions: collect higher-order interactions that contain current interaction
-        for i in range(n_interactions):
-            facs_i = set(parglmo['interactions'][i]['factors'])
+                if f not in chain:
+                    continue
+
+                f2_order = int(parglmo['factors'][f2]['order'])
+                if f2_order <= f_order:
+                    continue
+
+                candidates.append(("F",f2,f2_order))
+
             for i2 in range(n_interactions):
+                facs = parglmo['interactions'][i2]['factors']
+                if f not in facs:
+                    continue
+
+                rest = [g for g in facs if g != f]
+
+                if not any(int(Random[g].item()) == 1 for g in rest):
+                    continue
+
+                i2_order = int(parglmo['interactions'][i2]['order'])
+                if i_order <= f_order:
+                    continue
+
+                candidates.append(("I",i2,i2_order))
+
+            if not candidates:
+                continue
+
+            closest_order = min(o for (_typ, _idx, o) in candidates)
+            parglmo['factors'][f]['refF'] = [idx for (typ, idx, o) in candidates if typ == "F" and o == closest_order]
+            parglmo['factors'][f]['refI'] = [idx for (typ, idx, o) in candidates if typ == "I" and o == closest_order]
+
+        for i in range(n_interactions):
+            i_order = int(parglmo['interactions'][i]['order'])
+            facs_i = set(parglmo['interactions'][i]['factors'])
+
+            candidates = []  # tuples: (idx, order)
+
+            for i2 in range(n_interactions):
+                if i2 == i:
+                    continue
+                if df_int[i2].item() <= 0:
+                    continue
+
                 facs_i2 = set(parglmo['interactions'][i2]['factors'])
-                if facs_i.issubset(facs_i2) and (len(facs_i2) > len(facs_i)) and df_int[i2].item() > 0:
-                    rest = list(facs_i2 - facs_i)
-                    if any(int(Random[g].item()) == 1 for g in rest):
-                        MS_i2 = SSQ_interactions[0, i2].item() / df_int[i2].item()
-                        if MS_e < MS_i2:
-                            parglmo['interactions'][i]['refI'].append(i2)
+                if not (facs_i.issubset(facs_i2) and (len(facs_i2) > len(facs_i))):
+                    continue
+
+                rest = list(facs_i2 - facs_i)
+                if not any(int(Random[g].item()) == 1 for g in rest):
+                    continue
+
+                i2_order = int(parglmo['interactions'][i2]['order'])
+                if i2_order <= i_order:   # NOT equal, must be strictly higher stratum
+                    continue
+
+                candidates.append(("I", i2, i2_order))
+
+            if not candidates:
+                continue
+
+            closest_order = min(o for (_typ, _idx, o) in candidates)
+            parglmo['interactions'][i]['refI'] = [idx for (typ, idx, o) in candidates if o == closest_order]
 
     # Compute nominal F-values for factors before the loop
     for f in range(n_factors):
         if Ts == 2:
-            refF = parglmo['factors'][f].get('refF', [])
+            refF = parglmo['factors'][f].get('refF', []) #return empty list if refF is none (residuals)
             refI = parglmo['factors'][f].get('refI', [])
 
             SSref = sum(SSQ_factors[0, f2].item() for f2 in refF) + \
@@ -732,17 +733,23 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     for f in range(n_factors):
         rf = parglmo['factors'][f].get('refF', [])
         ri = parglmo['factors'][f].get('refI', [])
+ 
+        rf_print = [x+1 for x in rf]
+        ri_print = [x+1 for x in ri]
 
         if (rf or ri):
-            den_ref_col.append(f"F{rf};I{ri}")
+            den_ref_col.append(f"F{rf_print};I{ri_print}")
         else:
             den_ref_col.append("Residuals")  
 
     # Interaction rows
     for i in range(n_interactions):
         ri = parglmo['interactions'][i].get('refI', [])
+
+        ri_print = [x+1 for x in ri]
+
         if ri:
-            den_ref_col.append(f"I{ri}")
+            den_ref_col.append(f"I{ri_print}")
         else:
             den_ref_col.append("Residuals")
 

@@ -52,9 +52,9 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         if np.iscomplexobj(X):
            X = torch.tensor(X, dtype=torch.complex64)
         else:
-           X = torch.tensor(X, dtype=torch.float)
+           X = torch.tensor(X, dtype=torch.float64)
     if not isinstance(F, torch.Tensor):
-        F = torch.tensor(F, dtype=torch.float)
+        F = torch.tensor(F, dtype=torch.float64)
 
     # Check: if any column in F has only one unique value then return an error.
     for col in range(F.shape[1]):
@@ -193,15 +193,17 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
             dt = torch.ones(X.shape[1])
         elif Preprocessing == 2:
             m = torch.mean(X, dim=0)
-            s = torch.std(X, dim=0, unbiased=False)
+            s = torch.std(X, dim=0, unbiased=True)
             dt = s
             Xs = (X - m) / s
         else:
             raise ValueError('Invalid Preprocessing option')
         return Xs, m, dt
 
-    X, m, dt = preprocess2D(X, Preprocessing=Preprocessing)
-    X = X / dt.to(device)  # Scale the data
+    X0 = X.clone()
+    _, m, dt = preprocess2D(X, Preprocessing=Preprocessing)
+    dt = dt.to(device)
+    X = X0 / dt
     parglmo['scale'] = dt
 
     # Create the Design Matrix D
@@ -343,52 +345,52 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         print('Warning: degrees of freedom exhausted')
         return
 
-    # DEBUG: nested sanity check (correct)
-    # Each nested-design column must only be active (nonzero) within ONE parent level.
-    for child, parent in nested_child_to_parent.items():
-        child_cols = parglmo['factors'][child]['Dvars']
-        if len(child_cols) == 0:
-            continue
+    # # DEBUG: nested sanity check (correct)
+    # # Each nested-design column must only be active (nonzero) within ONE parent level.
+    # for child, parent in nested_child_to_parent.items():
+    #     child_cols = parglmo['factors'][child]['Dvars']
+    #     if len(child_cols) == 0:
+    #         continue
 
-        for k in child_cols:
-            nz = (D[:, k] != 0)
-            parent_levels_used = torch.unique(F[nz, parent], sorted=True)
-            assert parent_levels_used.numel() == 1, (
-                f"Nested column {k} for child factor {child} is active in multiple "
-                f"parent levels of factor {parent}: {parent_levels_used.tolist()}"
-            )
-    print("Nested sanity check passed: each nested column belongs to exactly one parent level.")
+    #     for k in child_cols:
+    #         nz = (D[:, k] != 0)
+    #         parent_levels_used = torch.unique(F[nz, parent], sorted=True)
+    #         assert parent_levels_used.numel() == 1, (
+    #             f"Nested column {k} for child factor {child} is active in multiple "
+    #             f"parent levels of factor {parent}: {parent_levels_used.tolist()}"
+    #         )
+    # print("Nested sanity check passed: each nested column belongs to exactly one parent level.")
 
-    print("\n--- D summary ---")
-    print("D shape:", tuple(D.shape))
-    for f in range(n_factors):
-        dv = parglmo["factors"][f]["Dvars"]
-        print(
-            f"Factor {f}: #Dvars={len(dv)}, order={parglmo['factors'][f].get('order')}, "
-            f"nested_chain={parglmo['factors'][f].get('factors')}"
-        )
+    # print("\n--- D summary ---")
+    # print("D shape:", tuple(D.shape))
+    # for f in range(n_factors):
+    #     dv = parglmo["factors"][f]["Dvars"]
+    #     print(
+    #         f"Factor {f}: #Dvars={len(dv)}, order={parglmo['factors'][f].get('order')}, "
+    #         f"nested_chain={parglmo['factors'][f].get('factors')}"
+    #     )
 
-    A, B = 0, 1
-    B_cols = parglmo["factors"][B]["Dvars"]
+    # A, B = 0, 1
+    # B_cols = parglmo["factors"][B]["Dvars"]
 
-    print("\n--- Column ownership: B(A) ---")
-    for k in B_cols[:min(10, len(B_cols))]:  # print a few
-        nz = (D[:, k] != 0)
-        owners = torch.unique(F[nz, A]).detach().cpu().numpy().tolist()
-        print(f"B col {k}: active A-levels = {owners}")
+    # print("\n--- Column ownership: B(A) ---")
+    # for k in B_cols[:min(10, len(B_cols))]:  # print a few
+    #     nz = (D[:, k] != 0)
+    #     owners = torch.unique(F[nz, A]).detach().cpu().numpy().tolist()
+    #     print(f"B col {k}: active A-levels = {owners}")
     
-    C = 2
-    C_cols = parglmo["factors"][C]["Dvars"]
+    # C = 2
+    # C_cols = parglmo["factors"][C]["Dvars"]
 
-    print("\n--- Column ownership: C(B) ---")
-    for k in C_cols[:min(10, len(C_cols))]:
-        nz = (D[:, k] != 0)
-        owners = torch.unique(F[nz, B]).detach().cpu().numpy().tolist()
-        print(f"C col {k}: active B-levels = {owners}")
+    # print("\n--- Column ownership: C(B) ---")
+    # for k in C_cols[:min(10, len(C_cols))]:
+    #     nz = (D[:, k] != 0)
+    #     owners = torch.unique(F[nz, B]).detach().cpu().numpy().tolist()
+    #     print(f"C col {k}: active B-levels = {owners}")
 
-    print("\n--- D (nonzero pattern) first 40 rows, first 40 cols ---")
-    Dn = (D[:40, :40] != 0).int().detach().cpu().numpy()
-    print(Dn)
+    # print("\n--- D (nonzero pattern) first 40 rows, first 40 cols ---")
+    # Dn = (D[:40, :40] != 0).int().detach().cpu().numpy()
+    # print(Dn)
 
     # Handle missing data
     Xnan = X.clone()
@@ -422,7 +424,9 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         SSQ_X = torch.sum(X ** 2).item()
 
     # GLM model calibration with LS
-    pD = torch.pinverse(D.T @ D) @ D.T
+    #pD = torch.pinverse(D.T @ D) @ D.T
+    D = D.to(X.dtype)
+    pD = torch.linalg.pinv(D)
     B = pD @ X
     X_residuals = X - D @ B
     parglmo['D'] = D
@@ -435,6 +439,11 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     else:
         parglmo['inter'] = 0
         SSQ_inter = 0
+
+    if Preprocessing:
+        SSQ_Xc = torch.sum(torch.abs(X - parglmo['inter']) ** 2).item()
+    else:
+        SSQ_Xc = SSQ_X
 
     if X_residuals.is_complex():
         SSQ_residuals = torch.sum(
@@ -460,8 +469,8 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
 
     # Normalize at the final step
     parglmo['effects'] = 100 * np.array(
-        [SSQ_inter] + SSQ_factors[0, :].tolist() + SSQ_interactions[0, :].tolist() + [SSQ_residuals]
-    ) / (SSQ_X)
+    SSQ_factors[0, :].tolist() + SSQ_interactions[0, :].tolist() + [SSQ_residuals]
+    ) / (SSQ_Xc)
 
     parglmo['residuals'] = X_residuals
 
@@ -692,7 +701,8 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
     SSQ_list += SSQ_interactions[0, :].tolist()
     SSQ_list += [SSQ_residuals, SSQ_X]
 
-    par_list = parglmo['effects'].tolist() + [100]
+    #par_list = parglmo['effects'].tolist() + [100]
+    par_list = [np.nan] + parglmo['effects'].tolist() + [float(np.sum(parglmo['effects']))]
     DoF = [mdf] if Preprocessing else []
     DoF += df.tolist()
     
@@ -749,6 +759,8 @@ def parglm(X, F, Model='linear', Preprocessing=2, Permutations=1000, Ts=1,
         'Pvalue': p_values,
         'Den_ref': den_ref_col 
     }
+    # lens = {k: len(v) for k, v in col.items()}
+    # print("Column lengths:", lens)
 
     T = pd.DataFrame(data)
 
